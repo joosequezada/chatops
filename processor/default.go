@@ -75,6 +75,7 @@ type DefaultExecutor struct {
 	command     *DefaultCommand
 	visible     *bool
 	error       *bool
+	iconURL     string
 	attachments *sync.Map
 	actions     *sync.Map
 	posts       *sync.Map
@@ -134,6 +135,7 @@ type DefaultResponse struct {
 	Visible  *bool
 	Original *bool
 	Duration *bool
+	IconURL  string `yaml:"iconURL"`
 }
 
 type DefaultApproval struct {
@@ -157,6 +159,7 @@ type DefaultField struct {
 	Hint         string
 	Filter       string
 	Value        string
+	Visible      *bool
 }
 
 type DefaultAction struct {
@@ -234,6 +237,20 @@ func (de *DefaultExecutor) Error() bool {
 		return *de.error
 	}
 	return false
+}
+
+func (de *DefaultExecutor) IconURL() string {
+	if !utils.IsEmpty(de.iconURL) {
+		return de.iconURL
+	}
+	if de.command.config != nil {
+		url := de.command.config.Response.IconURL
+		if !utils.IsEmpty(url) {
+			return url
+		}
+	}
+
+	return ""
 }
 
 /*func (de *DefaultExecutor) Reaction() bool {
@@ -496,6 +513,22 @@ func (de *DefaultExecutor) fRunTemplate(fileName string, obj interface{}) (strin
 	return de.template.TemplateRenderFile(s, obj)
 }
 
+func (de *DefaultExecutor) fRunTemplateAsJson(fileName string, obj interface{}) interface{} {
+
+	s, err := de.fRunTemplate(fileName, obj)
+	if err != nil {
+		de.command.logger.Error(s)
+		return common.MakeTemplateJsonResult(err)
+	}
+	var r interface{}
+	err = json.Unmarshal([]byte(s), &r)
+	if err != nil {
+		de.command.logger.Error(s)
+		return common.MakeTemplateJsonResult(err)
+	}
+	return r
+}
+
 func (de *DefaultExecutor) fRunBook(fileName string, obj interface{}) (string, error) {
 
 	s := de.filePath(de.command.processor.options.RunbooksDir, fileName)
@@ -621,9 +654,32 @@ func (de *DefaultExecutor) fDeleteMessage(channelID, messageID string) string {
 	return ""
 }
 
-func (de *DefaultExecutor) fReadMessage(channelID, messageID string) string {
+func (de *DefaultExecutor) fSendImage(params map[string]any) string {
 
-	text, err := de.bot.ReadMessage(channelID, messageID)
+	channelID, _ := params["channelID"].(string)
+	threadTS, _ := params["threadID"].(string)
+	fileContent, _ := params["fileContent"].([]byte)
+	filename, _ := params["filename"].(string)
+	initialComment, _ := params["initialComment"].(string)
+
+	if len(fileContent) == 0 {
+		e := true
+		de.error = &e
+		return "SendImage err => empty file content"
+	}
+
+	err := de.bot.SendImage(channelID, threadTS, fileContent, filename, initialComment)
+	if err != nil {
+		e := true
+		de.error = &e
+		return err.Error()
+	}
+	return ""
+}
+
+func (de *DefaultExecutor) fReadMessage(channelID, messageTS, threadTS string) string {
+
+	text, err := de.bot.ReadMessage(channelID, messageTS, threadTS)
 
 	if err != nil {
 		e := true
@@ -631,6 +687,17 @@ func (de *DefaultExecutor) fReadMessage(channelID, messageID string) string {
 		return err.Error()
 	}
 	return text
+}
+
+func (de *DefaultExecutor) fReadThread(channelID, threadTS string) []string {
+
+	messages, err := de.bot.ReadThread(channelID, threadTS)
+	if err != nil {
+		e := true
+		de.error = &e
+		return []string{err.Error()}
+	}
+	return messages
 }
 
 func (de *DefaultExecutor) fUpdateMessage(channelID, messageID, text string) string {
@@ -679,6 +746,7 @@ func (de *DefaultExecutor) fAddRemoveReactionOnMessage(channelID, messageID, fir
 func (de *DefaultExecutor) fAskOpenAI(params map[string]interface{}) string {
 	apiKey, _ := params["apiKey"].(string)
 	model, _ := params["model"].(string)
+	baseURL, _ := params["baseURL"].(string)
 	timeout, _ := params["timeout"].(int)
 	if timeout == 0 {
 		timeout = 30
@@ -718,6 +786,7 @@ func (de *DefaultExecutor) fAskOpenAI(params map[string]interface{}) string {
 		Model:    model,
 		Timeout:  timeout,
 		Messages: messages,
+		BaseURL:  baseURL,
 	}
 
 	openAI := vendors.NewOpenAI(options)
@@ -732,9 +801,25 @@ func (de *DefaultExecutor) fAskOpenAI(params map[string]interface{}) string {
 	return string(response)
 }
 
+func (de *DefaultExecutor) fAddDivider(channelID, ID string) string {
+	err := de.bot.AddDivider(channelID, ID)
+
+	if err != nil {
+		e := true
+		de.error = &e
+		return err.Error()
+	}
+	return ""
+}
+
 func (de *DefaultExecutor) fSetError() string {
 	e := true
 	de.error = &e
+	return ""
+}
+
+func (de *DefaultExecutor) fSetIconURL(url string) string {
+	de.iconURL = url
 	return ""
 }
 
@@ -1001,6 +1086,7 @@ func NewExecutorTemplate(name string, content string, executor *DefaultExecutor,
 	funcs["runFile"] = executor.fRunFile
 	funcs["runCommand"] = executor.fRunCommand
 	funcs["runTemplate"] = executor.fRunTemplate
+	funcs["runTemplateAsJson"] = executor.fRunTemplateAsJson
 	funcs["runBook"] = executor.fRunBook
 	funcs["postFile"] = executor.fPostFile
 	funcs["postCommand"] = executor.fPostCommand
@@ -1009,12 +1095,20 @@ func NewExecutorTemplate(name string, content string, executor *DefaultExecutor,
 	funcs["sendMessage"] = executor.fSendMessage
 	funcs["sendMessageByParent"] = executor.fSendMessageByParent
 	funcs["sendMessageEx"] = executor.fSendMessageEx
+
 	funcs["setInvisible"] = executor.fSetInvisible
 	funcs["setError"] = executor.fSetError
+	funcs["setIconURL"] = executor.fSetIconURL
+
 	funcs["deleteMessage"] = executor.fDeleteMessage
 	funcs["readMessage"] = executor.fReadMessage
+	funcs["readThread"] = executor.fReadThread
+	funcs["sendImage"] = executor.fSendImage
+
 	funcs["updateMessage"] = executor.fUpdateMessage
 	funcs["askOpenAI"] = executor.fAskOpenAI
+	funcs["addDivider"] = executor.fAddDivider
+	funcs["gracefulAbort"] = executor.fGracefulAbort
 
 	templateOpts := toolsRender.TemplateOptions{
 		Name:    fmt.Sprintf("default-internal-%s", name),
@@ -1112,6 +1206,15 @@ func (df *DefaultFieldWrapper) Value() string {
 	return df.DefaultField.Value
 }
 
+func (df *DefaultFieldWrapper) Visible() bool {
+
+	v := df.DefaultField.Visible
+	if v == nil {
+		return true
+	}
+	return *df.DefaultField.Visible
+}
+
 func (df *DefaultFieldWrapper) Parent() common.Field {
 	return df.parent
 }
@@ -1135,7 +1238,7 @@ func (df *DefaultField) merge(field *DefaultField, empty bool) bool {
 		return false
 	}
 
-	ft := fmt.Sprintf("%s", field.Type)
+	ft := string(field.Type)
 	if !utils.IsEmpty(ft) || (utils.IsEmpty(ft) && empty) {
 		df.Type = field.Type
 	}
@@ -1171,13 +1274,25 @@ func (df *DefaultField) merge(field *DefaultField, empty bool) bool {
 
 // DefaultFieldExecutor
 
-func (de *DefaultFieldExecutor) fReadMessage(channelID, messageID string) string {
+func (de *DefaultFieldExecutor) fReadMessage(channelID, messageTS, threadTS string) string {
 
-	text, err := de.bot.ReadMessage(channelID, messageID)
+	text, err := de.bot.ReadMessage(channelID, messageTS, threadTS)
+
 	if err != nil {
+
 		return err.Error()
 	}
 	return text
+}
+
+func (de *DefaultFieldExecutor) fReadThread(channelID, threadTS string) []string {
+
+	messages, err := de.bot.ReadThread(channelID, threadTS)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	return messages
+
 }
 
 func (de *DefaultFieldExecutor) fRunTemplate(fileName string, obj interface{}) (string, error) {
@@ -1193,7 +1308,7 @@ func (de *DefaultFieldExecutor) fRunTemplate(fileName string, obj interface{}) (
 	}
 
 	tOpts := toolsRender.TemplateOptions{
-		Name:    fmt.Sprintf("default-internal-field-%s", de.field.Name),
+		Name:    fmt.Sprintf("default-internal-field-%s", de.field.Name()),
 		Content: string(content),
 		Funcs:   de.funcs,
 	}
@@ -1204,8 +1319,38 @@ func (de *DefaultFieldExecutor) fRunTemplate(fileName string, obj interface{}) (
 	return t.TemplateRenderFile(s, obj)
 }
 
+func (de *DefaultFieldExecutor) fRunTemplateAsJson(fileName string, obj interface{}) interface{} {
+
+	s, err := de.fRunTemplate(fileName, obj)
+	if err != nil {
+		de.command.logger.Error(s)
+		return common.MakeTemplateJsonResult(err)
+	}
+	if utils.IsEmpty(s) {
+		err := fmt.Errorf("Default couldn't run template %s, empty result", fileName)
+		de.command.logger.Error(err)
+		return common.MakeTemplateJsonResult(err)
+	}
+	var r interface{}
+	err = json.Unmarshal([]byte(s), &r)
+	if err != nil {
+		de.command.logger.Error(err)
+		return common.MakeTemplateJsonResult(err)
+	}
+	return r
+}
+
 func (de *DefaultFieldExecutor) fFieldList(items ...*DefaultField) []*DefaultField {
 	return items
+}
+
+func (de *DefaultFieldExecutor) fSetFieldLabel(label string) (string, error) {
+
+	if de.field == nil || de.field.DefaultField == nil {
+		return "", fmt.Errorf("Default couldn't set field label, field is nil")
+	}
+	de.field.DefaultField.Label = label
+	return "", nil
 }
 
 func (de *DefaultFieldExecutor) fSetFieldValue(value string) (string, error) {
@@ -1302,9 +1447,16 @@ func (de *DefaultFieldExecutor) fSetField(field *DefaultField, params map[string
 		field.Filter = filter
 	}
 
-	value, ok := params["value"].(string)
+	value := params["value"]
+	if utils.IsEmpty(value) {
+		field.Value = ""
+	} else {
+		field.Value = fmt.Sprintf("%v", value)
+	}
+
+	visible, ok := params["visible"].(bool)
 	if ok {
-		field.Value = value
+		field.Visible = &visible
 	}
 
 	return ""
@@ -1379,9 +1531,12 @@ func NewFieldExecutorTemplate(name string, content string, executor *DefaultFiel
 
 	funcs := make(map[string]any)
 	funcs["runTemplate"] = executor.fRunTemplate
+	funcs["runTemplateAsJson"] = executor.fRunTemplateAsJson
 	funcs["readMessage"] = executor.fReadMessage
+	funcs["readThread"] = executor.fReadThread
 
 	funcs["fieldList"] = executor.fFieldList
+	funcs["setFieldLabel"] = executor.fSetFieldLabel
 	funcs["setFieldValue"] = executor.fSetFieldValue
 	funcs["setFieldValues"] = executor.fSetFieldValues
 	funcs["setField"] = executor.fSetField
@@ -1389,6 +1544,7 @@ func NewFieldExecutorTemplate(name string, content string, executor *DefaultFiel
 
 	funcs["setError"] = func() string { return "" }
 	funcs["setInvisible"] = func() string { return "" }
+	funcs["setIconURL"] = func() string { return "" }
 
 	templateOpts := toolsRender.TemplateOptions{
 		Name:    fmt.Sprintf("default-internal-%s", name),
@@ -1696,6 +1852,10 @@ func (dcr *DefaultCommandResponse) Original() bool {
 
 func (dcr *DefaultCommandResponse) Error() bool {
 	return false
+}
+
+func (dcr *DefaultCommandResponse) IconURL() string {
+	return ""
 }
 
 // DefaultCommandApproval
@@ -2185,7 +2345,7 @@ func (dc *DefaultCommand) Execute(bot common.Bot, message common.Message, params
 
 	msg, atts, acts, err := executor.execute("", m, message)
 	if err != nil {
-		dc.logger.Error(err)
+		dc.logger.Error(common.TemplateShortError(err))
 		err = fmt.Errorf("%s", dc.processor.options.Error)
 		return nil, "", nil, nil, err
 	}
@@ -2200,6 +2360,41 @@ func (d *Default) Name() string {
 
 func (d *Default) Commands() []common.Command {
 	return d.commands
+}
+
+func (de *DefaultExecutor) fGracefulAbort() string {
+	var userID, userName, userTimezone, channelID string
+	var userCommands []string
+
+	if de.message != nil {
+		user := de.message.User()
+		if user != nil {
+			userID = user.ID()
+			userName = user.Name()
+			userTimezone = user.TimeZone()
+			userCommands = user.Commands()
+		}
+
+		channel := de.message.Channel()
+		if channel != nil {
+			channelID = channel.ID()
+		}
+	}
+
+	if de.command != nil && de.command.logger != nil {
+		de.command.logger.Info("SECURITY AUDIT: Graceful shutdown initiated by user. UserID: %s, UserName: %s, ChannelID: %s, UserTimezone: %s, UserPermissions: %v, MessageID: %s",
+			userID, userName, channelID, userTimezone, userCommands, de.message.ID())
+	}
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+
+		if proc, err := os.FindProcess(os.Getpid()); err == nil {
+			proc.Signal(os.Interrupt)
+		}
+	}()
+
+	return fmt.Sprintf("Initiating graceful shutdown... by Slack user %s (%s)", userName, userID)
 }
 
 func (d *Default) loadConfig(path string) (*DefaultCommandConfig, error) {
@@ -2266,6 +2461,72 @@ func (d *Default) AddCommand(name, path string) error {
 	return nil
 }
 
+func (dca *DefaultCommandApproval) runTemplate(fileName string, obj interface{}) (string, error) {
+
+	path := fmt.Sprintf("%s%s%s", dca.command.processor.options.TemplatesDir, string(os.PathSeparator), fileName)
+	if !utils.FileExists(path) {
+		return "", fmt.Errorf("couldn't find template file %s", path)
+	}
+
+	content, err := utils.Content(path)
+	if err != nil {
+		return "", fmt.Errorf("error reading template %s: %v", path, err)
+	}
+
+	templateName := fmt.Sprintf("approval-runtemplate-%s", fileName)
+	templateOpts := toolsRender.TemplateOptions{
+		Name:    templateName,
+		Content: string(content),
+	}
+
+	t, err := toolsRender.NewTextTemplate(templateOpts, dca.command.processor.observability)
+	if err != nil {
+		return "", fmt.Errorf("error creating template %s: %v", fileName, err)
+	}
+
+	result, err := t.RenderObject(obj)
+	if err != nil {
+		return "", fmt.Errorf("error rendering template %s: %v", fileName, err)
+	}
+
+	return string(result), nil
+}
+
+func (dca *DefaultCommandApproval) runTemplateAsJson(fileName string, obj interface{}) interface{} {
+
+	s, err := dca.runTemplate(fileName, obj)
+	if err != nil {
+		dca.command.logger.Error(err)
+		return common.MakeTemplateJsonResult(err)
+	}
+	if utils.IsEmpty(s) {
+		err := fmt.Errorf("Default couldn't run template %s, empty result", fileName)
+		return common.MakeTemplateJsonResult(err)
+	}
+	var r interface{}
+	err = json.Unmarshal([]byte(s), &r)
+	if err != nil {
+		dca.command.logger.Error(err)
+		return common.MakeTemplateJsonResult(err)
+	}
+	return r
+}
+
+func (dca *DefaultCommandApproval) addTemplateFunctions(funcs map[string]any, bot common.Bot, message common.Message, params common.ExecuteParams) {
+
+	funcs["getBot"] = func() interface{} { return bot }
+	funcs["getUser"] = func() interface{} { return message.User() }
+	funcs["getParams"] = func() interface{} { return params }
+	funcs["getMessage"] = func() interface{} { return message }
+	funcs["getChannel"] = func() interface{} { return message.Channel() }
+	funcs["runTemplate"] = dca.runTemplate
+	funcs["runTemplateAsJson"] = dca.runTemplateAsJson
+
+	// postTemplate cannot be used in the approval template (as it implements after)
+
+	funcs["isEmpty"] = utils.IsEmpty
+}
+
 func NewDefault(name string, options DefaultOptions, observability *common.Observability, processors *common.Processors) *Default {
 
 	return &Default{
@@ -2275,46 +2536,4 @@ func NewDefault(name string, options DefaultOptions, observability *common.Obser
 		meter:         observability.Metrics(),
 		observability: observability,
 	}
-}
-
-func (dca *DefaultCommandApproval) addTemplateFunctions(funcs map[string]any, bot common.Bot, message common.Message, params common.ExecuteParams) {
-	funcs["getBot"] = func() interface{} { return bot }
-	funcs["getUser"] = func() interface{} { return message.User() }
-	funcs["getParams"] = func() interface{} { return params }
-	funcs["getMessage"] = func() interface{} { return message }
-	funcs["getChannel"] = func() interface{} { return message.Channel() }
-
-	funcs["runTemplate"] = func(fileName string, obj interface{}) (string, error) {
-		path := fmt.Sprintf("%s%s%s", dca.command.processor.options.TemplatesDir, string(os.PathSeparator), fileName)
-		if !utils.FileExists(path) {
-			return "", fmt.Errorf("couldn't find template file %s", path)
-		}
-
-		content, err := utils.Content(path)
-		if err != nil {
-			return "", fmt.Errorf("error reading template %s: %v", path, err)
-		}
-
-		templateName := fmt.Sprintf("approval-runtemplate-%s", fileName)
-		templateOpts := toolsRender.TemplateOptions{
-			Name:    templateName,
-			Content: string(content),
-		}
-
-		t, err := toolsRender.NewTextTemplate(templateOpts, dca.command.processor.observability)
-		if err != nil {
-			return "", fmt.Errorf("error creating template %s: %v", fileName, err)
-		}
-
-		result, err := t.RenderObject(obj)
-		if err != nil {
-			return "", fmt.Errorf("error rendering template %s: %v", fileName, err)
-		}
-
-		return string(result), nil
-	}
-
-	// postTemplate cannot be used in the approval template (as it implements after)
-
-	funcs["isEmpty"] = utils.IsEmpty
 }
