@@ -14,6 +14,7 @@ import (
 	"github.com/devopsext/chatops/bot"
 	"github.com/devopsext/chatops/common"
 	"github.com/devopsext/chatops/processor"
+	"github.com/devopsext/chatops/server"
 	"github.com/slack-go/slack"
 
 	sreCommon "github.com/devopsext/sre/common"
@@ -33,6 +34,13 @@ var mainWG sync.WaitGroup
 type RootOptions struct {
 	Logs    []string
 	Metrics []string
+}
+
+var httpServerInstance *server.HttpServer
+
+var httpServerOptions = server.HttpServerOptions{
+	Listen:      envGet("HTTP_SERVER_LISTEN", ":8081").(string),
+	AllowedCmds: strings.Split(envGet("HTTP_SERVER_ALLOWED_CMDS", "release").(string), ","),
 }
 
 var rootOptions = RootOptions{
@@ -102,9 +110,10 @@ var slackOptions = bot.SlackOptions{
 	ButtonRejectCaption:  envGet("SLACK_BUTTON_REJECT_CAPTION", "Reject").(string),
 	ButtonApproveCaption: envGet("SLACK_BUTTON_APPROVE_CAPTION", "Approve").(string),
 
-	CacheTTL:        envGet("SLACK_CACHE_TTL", "1h").(string),
-	MaxQueryOptions: envGet("SLACK_MAX_QUERY_OPTIONS", 15).(int),
-	MinQueryLength:  envGet("SLACK_MIN_QUERY_LENGTH", 2).(int),
+	CacheTTL:            envGet("SLACK_CACHE_TTL", "1h").(string),
+	CacheTagMessagesTTL: envGet("SLACK_CACHE_TAG_MESSAGES_TTL", "720h").(string), // 30 days (approximately 1 month)
+	MaxQueryOptions:     envGet("SLACK_MAX_QUERY_OPTIONS", 15).(int),
+	MinQueryLength:      envGet("SLACK_MIN_QUERY_LENGTH", 2).(int),
 
 	UserGroupsInterval: envGet("SLACK_USER_GROUPS_INTERVAL", 5).(int),
 
@@ -138,6 +147,12 @@ func interceptSyscall() {
 		if botsInstance != nil {
 			logs.Info("Stopping bots...")
 			botsInstance.Stop()
+		}
+
+		// Call Stop on HTTP server if available
+		if httpServerInstance != nil {
+			logs.Info("Stopping HTTP server...")
+			httpServerInstance.Stop()
 		}
 
 		logs.Info("Exiting...")
@@ -288,6 +303,11 @@ func Execute() {
 			// Store bots reference for graceful shutdown
 			botsInstance = bots
 
+			// Create and start HTTP server (bots implements CommandExecutor)
+			httpServer := server.NewHttpServer(httpServerOptions, obs, bots)
+			httpServerInstance = httpServer
+			httpServer.Start(&mainWG)
+
 			bots.Start(&mainWG)
 			mainWG.Wait()
 		},
@@ -332,6 +352,7 @@ func Execute() {
 	flags.StringVar(&slackOptions.RejectedMessage, "slack-rejected-message", slackOptions.RejectedMessage, "Slack rejected message")
 	flags.StringVar(&slackOptions.CacheFileName, "slack-cache-file-name", slackOptions.CacheFileName, "Slack cache file name")
 	flags.StringVar(&slackOptions.CacheTTL, "slack-cache-ttl", slackOptions.CacheTTL, "Slack cache TTL")
+	flags.StringVar(&slackOptions.CacheTagMessagesTTL, "slack-cache-tag-messages-ttl", slackOptions.CacheTagMessagesTTL, "Slack cache tag messages TTL")
 	flags.IntVar(&slackOptions.MaxQueryOptions, "slack-max-query-options", slackOptions.MaxQueryOptions, "Slack max query options")
 	flags.IntVar(&slackOptions.MinQueryLength, "slack-min-query-length", slackOptions.MinQueryLength, "Slack min query length")
 	flags.IntVar(&slackOptions.UserGroupsInterval, "slack-user-groups-interval", slackOptions.UserGroupsInterval, "Slack user groups interval")
@@ -341,6 +362,9 @@ func Execute() {
 	flags.StringVar(&defaultOptions.CommandExt, "default-command-ext", defaultOptions.CommandExt, "Default command extension")
 	flags.StringVar(&defaultOptions.ConfigExt, "default-config-ext", defaultOptions.ConfigExt, "Default config extension")
 	flags.StringVar(&defaultOptions.Error, "default-error", defaultOptions.Error, "Default error")
+
+	flags.StringVar(&httpServerOptions.Listen, "http-server-listen", httpServerOptions.Listen, "HTTP server listen address (e.g., :8081)")
+	flags.StringSliceVar(&httpServerOptions.AllowedCmds, "http-server-allowed-cmds", httpServerOptions.AllowedCmds, "HTTP server allowed commands (comma-separated)")
 
 	interceptSyscall()
 

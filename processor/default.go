@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -72,6 +73,7 @@ type DefaultPost struct {
 }
 
 type DefaultExecutor struct {
+	name        string
 	command     *DefaultCommand
 	visible     *bool
 	error       *bool
@@ -170,19 +172,20 @@ type DefaultAction struct {
 }
 
 type DefaultCommandConfig struct {
-	Description  string
-	Params       []string
-	Aliases      []string
-	Response     DefaultResponse
-	Fields       []*DefaultField
-	Actions      []*DefaultAction
-	Priority     int
-	Wrapper      bool
-	Schedule     string
-	Channel      string
-	Confirmation string
-	Approval     *DefaultApproval
-	Permissions  *bool
+	Description   string
+	Params        []string
+	Aliases       []string
+	Response      DefaultResponse
+	Fields        []*DefaultField
+	Actions       []*DefaultAction
+	Priority      int
+	Wrapper       bool
+	Schedule      string
+	Channel       string
+	Confirmation  string
+	Approval      *DefaultApproval
+	Permissions   *bool
+	TrackMessages *bool `yaml:"trackMessages"` // enable message tracking/tagging
 }
 
 type DefaultCommandResponse struct {
@@ -812,6 +815,34 @@ func (de *DefaultExecutor) fAddDivider(channelID, ID string) string {
 	return ""
 }
 
+func (de *DefaultExecutor) fTagMessage(channelID, timestamp string, tags map[string]any) string {
+
+	strTags := make(map[string]string)
+	for k, v := range tags {
+		strTags[k] = fmt.Sprintf("%v", v)
+	}
+
+	err := de.bot.TagMessage(channelID, timestamp, strTags)
+	if err != nil {
+		e := true
+		de.error = &e
+		return err.Error()
+	}
+	return ""
+}
+
+func (de *DefaultExecutor) fFindMessagesByTag(tagKey, tagValue string) string {
+
+	messages := de.bot.FindMessagesByTag(tagKey, tagValue)
+	b, err := json.Marshal(messages)
+	if err != nil {
+		e := true
+		de.error = &e
+		return err.Error()
+	}
+	return string(b)
+}
+
 func (de *DefaultExecutor) fSetError() string {
 	e := true
 	de.error = &e
@@ -868,6 +899,9 @@ func (de *DefaultExecutor) execute(id string, obj interface{}, message common.Me
 	}
 	labels["command"] = command.name
 	labels["bot"] = de.bot.Name()
+	if !utils.IsEmpty(de.name) && de.name != command.name {
+		labels["template"] = de.name
+	}
 
 	user := de.message.User()
 	if !utils.IsEmpty(user) {
@@ -876,11 +910,11 @@ func (de *DefaultExecutor) execute(id string, obj interface{}, message common.Me
 
 	prefixes := []string{"default", "processor"}
 
-	requests := processor.meter.Counter("processor", "requests", "Count of all executions", labels, prefixes...)
+	requests := processor.meter.Counter("commands", "executed", "Count of all executed commands", labels, prefixes...)
 	requests.Inc()
 
-	errors := processor.meter.Counter("processor", "errors", "Count of all errors during executions", labels, prefixes...)
-	timeCounter := processor.meter.Counter("processor", "time", "Sum of all time executions", labels, prefixes...)
+	errors := processor.meter.Counter("commands", "errors", "Count of all command execution errors", labels, prefixes...)
+	timeCounter := processor.meter.Counter("commands", "duration_ms", "Sum of command execution time in milliseconds", labels, prefixes...)
 
 	name := command.getNameWithGroup("/")
 
@@ -1108,6 +1142,8 @@ func NewExecutorTemplate(name string, content string, executor *DefaultExecutor,
 	funcs["updateMessage"] = executor.fUpdateMessage
 	funcs["askOpenAI"] = executor.fAskOpenAI
 	funcs["addDivider"] = executor.fAddDivider
+	funcs["tagMessage"] = executor.fTagMessage
+	funcs["findMessagesByTag"] = executor.fFindMessagesByTag
 	funcs["gracefulAbort"] = executor.fGracefulAbort
 
 	templateOpts := toolsRender.TemplateOptions{
@@ -1140,6 +1176,7 @@ func NewExecutor(name, path string, command *DefaultCommand, bot common.Bot, mes
 	}
 
 	executor := &DefaultExecutor{
+		name:        name,
 		command:     command,
 		attachments: &sync.Map{},
 		actions:     &sync.Map{},
@@ -1609,7 +1646,8 @@ func (dre *DefaultRunbookCommandExecutor) execute() error {
 
 	m := dre.message
 
-	return dre.bot.Command(channel.ID(), dre.command, user, m, response)
+	_, err := dre.bot.Command(channel.ID(), dre.command, user, m, response)
+	return err
 }
 
 // Default Runbook Executor
@@ -1731,8 +1769,11 @@ func (dr *DefaultRunbook) runPipeline(id string, pl []*DefaultRunbookStep, bot c
 		}
 
 		g.Go(func() error {
+			localParams := make(map[string]any)
 
-			executor, err := NewRunbookExecutor(dr, step, bot, parent, params)
+			maps.Copy(localParams, params)
+
+			executor, err := NewRunbookExecutor(dr, step, bot, parent, localParams)
 			if err != nil {
 				return err
 			}
@@ -1740,7 +1781,7 @@ func (dr *DefaultRunbook) runPipeline(id string, pl []*DefaultRunbookStep, bot c
 				return nil
 			}
 
-			r1 := executor.execute(id1, params, parent)
+			r1 := executor.execute(id1, localParams, parent)
 			if r1 != nil && r1.Error != nil {
 				return r1.Error
 			}
@@ -1762,7 +1803,7 @@ func (dr *DefaultRunbook) runPipeline(id string, pl []*DefaultRunbookStep, bot c
 				}
 			}
 
-			err = dr.runPipeline(id1, step.Pipeline, bot, parent, params, callback, true)
+			err = dr.runPipeline(id1, step.Pipeline, bot, parent, localParams, callback, true)
 			if err != nil {
 				return err
 			}
@@ -2267,6 +2308,9 @@ func (dc *DefaultCommand) Confirmation(params common.ExecuteParams) string {
 	if dc.config != nil {
 
 		content := dc.config.Confirmation
+		if utils.IsEmpty(content) {
+			return ""
+		}
 		name := fmt.Sprintf("%s-confirmation", dc.name)
 
 		tOpts := toolsRender.TemplateOptions{
@@ -2307,6 +2351,14 @@ func (dc *DefaultCommand) Permissions() bool {
 		return *dc.config.Permissions
 	}
 	return true
+}
+
+func (dc *DefaultCommand) TrackMessages() bool {
+
+	if dc.config != nil && dc.config.TrackMessages != nil {
+		return *dc.config.TrackMessages
+	}
+	return false
 }
 
 func (dc *DefaultCommand) Response() common.Response {
@@ -2474,9 +2526,17 @@ func (dca *DefaultCommandApproval) runTemplate(fileName string, obj interface{})
 	}
 
 	templateName := fmt.Sprintf("approval-runtemplate-%s", fileName)
+
+	// Create funcs map with runTemplate and runTemplateAsJson to support nested template calls
+	funcs := make(map[string]any)
+	funcs["runTemplate"] = dca.runTemplate
+	funcs["runTemplateAsJson"] = dca.runTemplateAsJson
+	funcs["isEmpty"] = utils.IsEmpty
+
 	templateOpts := toolsRender.TemplateOptions{
 		Name:    templateName,
 		Content: string(content),
+		Funcs:   funcs,
 	}
 
 	t, err := toolsRender.NewTextTemplate(templateOpts, dca.command.processor.observability)
