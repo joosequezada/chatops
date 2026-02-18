@@ -2627,31 +2627,13 @@ func (s *Slack) formBlocks(cmd common.Command, fields SlackMessageFields, params
 			el = e
 		case common.FieldTypeGroup:
 			options := []*slack.OptionBlockObject{}
-			var dBlock *slack.OptionBlockObject
-			if !utils.IsEmpty(def) {
-				groupName := s.findUserGroupNameByID(s.userGroups.items, def)
-				dBlock = slack.NewOptionBlockObject(groupName, slack.NewTextBlockObject(slack.PlainTextType, groupName, false, false), h)
-			}
 			e := slack.NewOptionsSelectBlockElement(slack.OptTypeExternal, h, actionID, options...)
-			if dBlock != nil {
-				e.InitialOption = dBlock
-			}
 			min := s.options.MinQueryLength
 			e.MinQueryLength = &min
 			el = e
 		case common.FieldTypeMultiGroup:
 			options := []*slack.OptionBlockObject{}
-			dBlocks := []*slack.OptionBlockObject{}
-			arr := s.parseArrayValues(def)
-			for _, v := range arr {
-				groupName := s.findUserGroupNameByID(s.userGroups.items, v)
-				block := slack.NewOptionBlockObject(groupName, slack.NewTextBlockObject(slack.PlainTextType, groupName, false, false), h)
-				dBlocks = append(dBlocks, block)
-			}
 			e := slack.NewOptionsMultiSelectBlockElement(slack.MultiOptTypeExternal, h, actionID, options...)
-			if len(dBlocks) > 0 {
-				e.InitialOptions = dBlocks
-			}
 			min := s.options.MinQueryLength
 			e.MinQueryLength = &min
 			el = e
@@ -4444,35 +4426,31 @@ func (s *Slack) handleBlockSuggestion(ctx *slacker.InteractionContext, req *sock
 		values = revls
 	}
 
-	re, _ := regexp.Compile(value)
-	if re != nil {
-
+	// Case-insensitive, partial matching - only return results if user typed something
+	query := strings.ToLower(value)
+	if !utils.IsEmpty(query) {
 		for _, v := range values {
-
 			if len(options) >= s.options.MaxQueryOptions {
 				break
 			}
-
-			if re.MatchString(v) {
-
+			if strings.Contains(strings.ToLower(v), query) {
 				var h *slack.TextBlockObject
 				if !utils.IsEmpty(fHint) {
 					h = slack.NewTextBlockObject(slack.PlainTextType, fHint, false, false)
 				}
-
 				options = append(options,
 					slack.NewOptionBlockObject(v, slack.NewTextBlockObject(slack.PlainTextType, v, false, false), h))
 			}
 		}
 	}
 
-	resposne := slack.OptionsResponse{
+	response := slack.OptionsResponse{
 		Options: options,
 	}
 
 	res := socketmode.Response{
 		EnvelopeID: req.EnvelopeID,
-		Payload:    resposne,
+		Payload:    response,
 	}
 
 	err := s.client.SocketModeClient().SendCtx(s.ctx, res)
