@@ -4384,20 +4384,41 @@ func (s *Slack) handleBlockSuggestion(ctx *slacker.InteractionContext, req *sock
 	}
 
 	// Case-insensitive, partial matching - only return results if user typed something
+	// Collect matches first, then sort by relevance:
+	// 1) index of match (prefix matches first), 2) shorter names, 3) alphabetical (case-insensitive)
 	query := strings.ToLower(value)
 	if !utils.IsEmpty(query) {
+		matches := []string{}
 		for _, v := range values {
+			if strings.Contains(strings.ToLower(v), query) {
+				matches = append(matches, v)
+			}
+		}
+
+		sort.Slice(matches, func(i, j int) bool {
+			li := strings.ToLower(matches[i])
+			lj := strings.ToLower(matches[j])
+			ii := strings.Index(li, query)
+			ij := strings.Index(lj, query)
+			if ii != ij {
+				return ii < ij
+			}
+			if len(matches[i]) != len(matches[j]) {
+				return len(matches[i]) < len(matches[j])
+			}
+			return li < lj
+		})
+
+		for _, v := range matches {
 			if len(options) >= s.options.MaxQueryOptions {
 				break
 			}
-			if strings.Contains(strings.ToLower(v), query) {
-				var h *slack.TextBlockObject
-				if !utils.IsEmpty(fHint) {
-					h = slack.NewTextBlockObject(slack.PlainTextType, fHint, false, false)
-				}
-				options = append(options,
-					slack.NewOptionBlockObject(v, slack.NewTextBlockObject(slack.PlainTextType, v, false, false), h))
+			var h *slack.TextBlockObject
+			if !utils.IsEmpty(fHint) {
+				h = slack.NewTextBlockObject(slack.PlainTextType, fHint, false, false)
 			}
+			options = append(options,
+				slack.NewOptionBlockObject(v, slack.NewTextBlockObject(slack.PlainTextType, v, false, false), h))
 		}
 	}
 
